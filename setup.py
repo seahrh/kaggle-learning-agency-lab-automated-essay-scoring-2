@@ -8,7 +8,7 @@ setup(
     install_requires=[
         "pandas==2.2.0",
         "pyarrow==15.0.0",
-        "scikit-learn==1.3.2",
+        "scikit-learn==1.5.0",
         "sentencepiece==0.1.99",  # no support yet for py3.12
         "spacy==3.7.2",
         "protobuf==3.20.3",  # required for deberta-v3 tokenizer

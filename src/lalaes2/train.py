@@ -12,15 +12,19 @@ from tqdm import tqdm
 
 import lalaes2 as mylib
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-pd.set_option("max_info_columns", 9999)
-pd.set_option("display.max_columns", 9999)
-pd.set_option("display.max_rows", 9999)
-pd.set_option("max_colwidth", 9999)
 tqdm.pandas()
 
 
 log = scml.get_logger(__name__)
+
+
+def _set_env() -> None:
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    pd.set_option("max_info_columns", 9999)
+    pd.set_option("display.max_columns", 9999)
+    pd.set_option("display.max_rows", 9999)
+    pd.set_option("max_colwidth", 9999)
 
 
 def _check_device() -> None:
@@ -36,6 +40,7 @@ def _check_device() -> None:
 
 
 def _main(argv=None):
+    _set_env()
     _check_device()
     node_rank = int(os.environ.get("NODE_RANK", -1))
     local_rank = int(os.environ.get("LOCAL_RANK", -1))

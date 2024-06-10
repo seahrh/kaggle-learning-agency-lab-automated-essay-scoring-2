@@ -12,7 +12,7 @@ import torch
 from pytorch_lightning.loggers import CSVLogger
 from scml import pandasx as pdx
 from scml import torchx
-from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import cohen_kappa_score, root_mean_squared_error
 
 # from torch import nn
 # from torch.nn import functional as F
@@ -36,6 +36,9 @@ log = scml.get_logger(__name__)
 
 
 class Aes2Dataset(Dataset):
+
+    HOLISTIC_SCORE_LABELS: List[int] = [1, 2, 3, 4, 5, 6]
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
@@ -100,7 +103,7 @@ def predict_holistic_score(
             # (batch_size, sequence_length, config.num_labels)
             logits = outputs.logits.detach().cpu()
             logits = logits.squeeze(-1)
-            log.info(f"logits.size={logits.size()}\n{logits}")
+            log.debug(f"{logits.size()}\n{logits}")
             res += logits.tolist()
     return np.array(res, dtype=dtype)
 
@@ -112,7 +115,7 @@ def evaluation(
     device: Optional[torch.device] = None,
     progress_bar: bool = True,
 ) -> Dict:
-    y_true: List[float] = [ds[i]["labels"].item() for i in range(len(ds))]
+    y_true: List[int] = [int(ds[i]["labels"].item()) for i in range(len(ds))]
     y_pred = predict_holistic_score(
         ds=ds,
         model=model,
@@ -120,8 +123,28 @@ def evaluation(
         device=device,
         dtype=np.float32,
         progress_bar=progress_bar,
-    )
-    return {"cohen_kappa_score": cohen_kappa_score(y1=y_true, y2=y_pred)}
+    ).tolist()
+    y_pred_cls: List[int] = []
+    for score in y_pred:
+        cls = 1
+        if score >= 5.5:
+            cls = 6
+        elif score >= 4.5:
+            cls = 5
+        elif score >= 3.5:
+            cls = 4
+        elif score >= 2.5:
+            cls = 3
+        elif score >= 1.5:
+            cls = 2
+        y_pred_cls.append(cls)
+    log.info(f"y_true={y_true}\ny_pred={y_pred}")
+    return {
+        "cohen_kappa_score": cohen_kappa_score(
+            y1=y_true, y2=y_pred_cls, labels=Aes2Dataset.HOLISTIC_SCORE_LABELS
+        ),
+        "rmse": root_mean_squared_error(y_true, y_pred),
+    }
 
 
 # noinspection PyAbstractClass
