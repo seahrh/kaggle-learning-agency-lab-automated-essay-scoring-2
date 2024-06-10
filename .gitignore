@@ -1,6 +1,7 @@
 input/
 output/
 models/
+huggingface
 .idea/
 
 # Byte-compiled / optimized / DLL files
