@@ -30,7 +30,13 @@ import lalaes2 as mylib
 
 # from transformers.modeling_outputs import TokenClassifierOutput
 
-__all__ = ["Aes2Dataset", "Aes2Model", "Aes2Task"]
+__all__ = [
+    "Aes2Dataset",
+    "Aes2Model",
+    "Aes2Task",
+    "predict_holistic_score",
+    "evaluation",
+]
 
 log = scml.get_logger(__name__)
 

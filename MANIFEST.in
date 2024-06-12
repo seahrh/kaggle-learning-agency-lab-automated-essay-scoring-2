@@ -1,0 +1,6 @@
+exclude *.ipynb
+include *.ini
+
+include models/aes2/deberta_v3_base/20240610_172052/*.json
+include models/aes2/deberta_v3_base/20240610_172052/*.safetensors
+include models/aes2/deberta_v3_base/20240610_172052/*.model
