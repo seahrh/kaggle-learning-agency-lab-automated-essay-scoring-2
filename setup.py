@@ -17,6 +17,7 @@ setup(
         "tqdm==4.66.4",
         "accelerate==0.30.1",
         "bitsandbytes==0.43.1",
+        "textstat==0.7.3",
     ],
     extras_require={
         "embeddings": [
