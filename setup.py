@@ -6,6 +6,7 @@ setup(
     version=__version__,
     python_requires=">=3.9,<3.13",
     install_requires=[
+        "lightgbm==4.2.0",
         "pandas==2.2.2",
         "pyarrow==16.1.0",
         "scikit-learn==1.5.0",
