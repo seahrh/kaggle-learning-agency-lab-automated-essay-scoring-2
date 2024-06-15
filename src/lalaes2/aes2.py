@@ -1,3 +1,4 @@
+import functools
 import gc
 import json
 from configparser import ConfigParser, SectionProxy
@@ -7,6 +8,7 @@ from typing import Dict, Iterable, List, Optional, Union
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
+import scipy
 import scml
 import torch
 from pytorch_lightning.loggers import CSVLogger
@@ -36,6 +38,8 @@ __all__ = [
     "Aes2Task",
     "predict_holistic_score",
     "evaluation",
+    "optimize_thresholds",
+    "qwk_metric",
 ]
 
 log = scml.get_logger(__name__)
@@ -114,6 +118,53 @@ def predict_holistic_score(
     return np.array(res, dtype=dtype)
 
 
+def optimize_thresholds(
+    y_true: List[int], logits: List[float], method: str = "nelder-mead"
+) -> List[float]:
+    def _qwk_negated(thresholds: np.ndarray):
+        y_pred: List[int] = []
+        for score in logits:
+            cls = 1
+            if score >= thresholds[4]:
+                cls = 6
+            elif score >= thresholds[3]:
+                cls = 5
+            elif score >= thresholds[2]:
+                cls = 4
+            elif score >= thresholds[1]:
+                cls = 3
+            elif score >= thresholds[0]:
+                cls = 2
+            y_pred.append(cls)
+        return -cohen_kappa_score(
+            y_true,
+            y_pred,
+            labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
+            weights="quadratic",
+        )
+
+    loss = functools.partial(_qwk_negated)
+    initial_coef = np.array([1.5, 2.5, 3.5, 4.5, 5.5])
+    res = scipy.optimize.minimize(loss, initial_coef, method=method)
+    return res.x.tolist()  # type: ignore[no-any-return]
+
+
+def qwk_metric(
+    y_true: List[int], logits: List[float], thresholds: List[float]
+) -> float:
+    y_pred = pd.cut(
+        x=logits,
+        bins=[-np.inf] + thresholds + [np.inf],
+        labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
+    )
+    return cohen_kappa_score(  # type: ignore[no-any-return]
+        y_true,
+        y_pred,
+        labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
+        weights="quadratic",
+    )
+
+
 def evaluation(
     ds: Aes2Dataset,
     model: PreTrainedModel,
@@ -130,29 +181,11 @@ def evaluation(
         dtype=np.float32,
         progress_bar=progress_bar,
     ).tolist()
-    y_pred: List[int] = []
-    for score in logits:
-        cls = 1
-        if score >= 5.5:
-            cls = 6
-        elif score >= 4.5:
-            cls = 5
-        elif score >= 3.5:
-            cls = 4
-        elif score >= 2.5:
-            cls = 3
-        elif score >= 1.5:
-            cls = 2
-        y_pred.append(cls)
-    log.info(f"y_true={y_true}\ny_pred={y_pred}")
+    thresholds = optimize_thresholds(y_true=y_true, logits=logits)
     return {
-        "cohen_kappa_score": cohen_kappa_score(
-            y1=y_true,
-            y2=y_pred,
-            labels=Aes2Dataset.HOLISTIC_SCORE_LABELS,
-            weights="quadratic",
-        ),
-        "rmse": root_mean_squared_error(y_true, y_pred),
+        "thresholds": thresholds,
+        "qwk": qwk_metric(y_true=y_true, logits=logits, thresholds=thresholds),
+        "rmse": root_mean_squared_error(y_true, logits),
     }
 
 
