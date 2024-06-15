@@ -122,7 +122,7 @@ def evaluation(
     progress_bar: bool = True,
 ) -> Dict:
     y_true: List[int] = [int(ds[i]["labels"].item()) for i in range(len(ds))]
-    y_pred = predict_holistic_score(
+    logits = predict_holistic_score(
         ds=ds,
         model=model,
         batch_size=batch_size,
@@ -130,8 +130,8 @@ def evaluation(
         dtype=np.float32,
         progress_bar=progress_bar,
     ).tolist()
-    y_pred_cls: List[int] = []
-    for score in y_pred:
+    y_pred: List[int] = []
+    for score in logits:
         cls = 1
         if score >= 5.5:
             cls = 6
@@ -143,11 +143,14 @@ def evaluation(
             cls = 3
         elif score >= 1.5:
             cls = 2
-        y_pred_cls.append(cls)
+        y_pred.append(cls)
     log.info(f"y_true={y_true}\ny_pred={y_pred}")
     return {
         "cohen_kappa_score": cohen_kappa_score(
-            y1=y_true, y2=y_pred_cls, labels=Aes2Dataset.HOLISTIC_SCORE_LABELS
+            y1=y_true,
+            y2=y_pred,
+            labels=Aes2Dataset.HOLISTIC_SCORE_LABELS,
+            weights="quadratic",
         ),
         "rmse": root_mean_squared_error(y_true, y_pred),
     }
