@@ -1,6 +1,6 @@
 exclude *.ipynb
 include *.ini
-include models/lgb/20240616_154117/lgb.txt
+include models/lgb/20240616_170816/lgb.txt
 
 include models/aes2/deberta_v3_base/20240615_063400/*.json
 include models/aes2/deberta_v3_base/20240615_063400/*.safetensors
