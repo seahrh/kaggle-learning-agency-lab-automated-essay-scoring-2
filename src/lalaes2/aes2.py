@@ -15,6 +15,7 @@ from pytorch_lightning.loggers import CSVLogger
 from scml import pandasx as pdx
 from scml import torchx
 from sklearn.metrics import cohen_kappa_score, root_mean_squared_error
+from sklearn.model_selection import StratifiedKFold
 
 # from torch import nn
 # from torch.nn import functional as F
@@ -381,6 +382,7 @@ class Aes2Task(mylib.Task):
         elif torch.backends.mps.is_available():
             self.accelerator = "mps"
             self.devices = 1
+        self.oof_n_splits: int = self.conf.getint("oof_n_splits")
         self.eval_every_n_steps: int = self.conf.getint("eval_every_n_steps")
         self.callbacks = mylib.training_callbacks(
             patience=self.conf.getint("patience"),
@@ -388,6 +390,14 @@ class Aes2Task(mylib.Task):
             ckpt_filename=self.conf.get("ckpt_filename", ""),
             save_top_k=self.conf.getint("ckpt_save_top_k"),
         )
+
+    def _device(self) -> torch.device:
+        device = torch.device("cpu")
+        if self.accelerator == "gpu":
+            device = torch.device(f"cuda:{self.devices[0]}")  # type: ignore[index]
+        elif self.accelerator == "mps":
+            device = torch.device("mps")
+        return device
 
     def _best_model(self) -> Aes2Model:
         if self.trainer is None:
@@ -445,6 +455,94 @@ class Aes2Task(mylib.Task):
                 )
             )
         log.info(f"Evaluation...DONE. Time taken {str(tim.elapsed)}")
+
+    def _oof_predictions(self, hps: Dict[str, mylib.ParamType]) -> None:
+        if self.tra_ds is None:
+            raise ValueError("train dataset must not be None")
+        log.info("Train model to generate out-of-fold predictions...")
+        log.info(f"hps={hps}")
+        oof_logits = np.full((len(self.tra_ds),), 0, dtype=np.float32)
+        with scml.Timer() as tim:
+            splitter = StratifiedKFold(n_splits=self.oof_n_splits, shuffle=True)
+            for fold, (ti, vi) in enumerate(
+                splitter.split(oof_logits, y=self.tra_ds.labels)
+            ):
+                gc.collect()
+                torch.cuda.empty_cache()
+                tra_ds = torch.utils.data.Subset(self.tra_ds, ti)
+                val_ds = torch.utils.data.Subset(self.tra_ds, vi)
+                log.info(
+                    f"fold={fold}, len(tra)={len(tra_ds):,}, len(val)={len(val_ds):,}"
+                )
+                trainer = pl.Trainer(
+                    enable_checkpointing=False,
+                    default_root_dir=self.conf["job_dir"],
+                    strategy=self.conf.get("train_strategy", "auto"),
+                    precision=self.conf.get("train_precision", None),
+                    accelerator=self.accelerator,
+                    devices=self.devices,
+                    max_epochs=self.conf.getint("oof_epochs"),
+                    deterministic=False,
+                    logger=CSVLogger(save_dir=self.conf["job_dir"]),
+                )
+                log.info(f"trainer.precision={trainer.precision}")
+                log.info(f"model_class={self.conf.get('model_class', 'auto')}")
+                num_workers: int = self.conf.getint("dataloader_num_workers")
+                trainer.fit(
+                    model=Aes2Model(
+                        pretrained_dir=self.mc["directory"],
+                        lr=float(hps["lr"]),
+                        swa_start_epoch=int(hps["swa_start_epoch"]),
+                        scheduler_conf=self.scheduler_conf,
+                        model_class=self.conf.get("model_class", "auto"),
+                        max_position_embeddings=(
+                            self.conf.getint("model_max_length")
+                            if "model_max_length" in self.conf
+                            else None
+                        ),
+                        gradient_checkpointing=(
+                            self.conf.getboolean("gradient_checkpointing")
+                            if "gradient_checkpointing" in self.conf
+                            else False
+                        ),
+                        hidden_dropout_prob=(
+                            self.conf.getfloat("hidden_dropout_prob")
+                            if "hidden_dropout_prob" in self.conf
+                            else None
+                        ),
+                        attention_probs_dropout_prob=(
+                            self.conf.getfloat("attention_probs_dropout_prob")
+                            if "attention_probs_dropout_prob" in self.conf
+                            else None
+                        ),
+                    ),
+                    train_dataloaders=DataLoader(
+                        tra_ds,
+                        batch_size=self.batch_size,
+                        shuffle=True,
+                        num_workers=num_workers,
+                        persistent_workers=True if num_workers > 0 else False,
+                    ),
+                    val_dataloaders=DataLoader(
+                        val_ds,
+                        batch_size=self.batch_size,
+                        shuffle=False,
+                        num_workers=num_workers,
+                        persistent_workers=True if num_workers > 0 else False,
+                    ),
+                )
+                oof_logits[vi] = predict_holistic_score(
+                    ds=val_ds,
+                    model=trainer.model.model,
+                    batch_size=self.batch_size,
+                    device=self._device(),
+                )
+                log.info(f"Fold {fold} completed")
+            with open(Path(self.conf["job_dir"]) / "oof.npy", "wb") as f:
+                np.save(f, oof_logits)
+        log.info(
+            f"Train model to generate out-of-fold predictions...DONE. Time taken {str(tim.elapsed)}"
+        )
 
     def _train_final_model(
         self,
@@ -542,6 +640,13 @@ class Aes2Task(mylib.Task):
     def run(self) -> None:
         with scml.Timer() as tim:
             self._get_datasets()
+            if self.conf.getboolean("oof_enable"):
+                self._oof_predictions(
+                    hps={
+                        "lr": self.conf.getfloat("lr"),
+                        "swa_start_epoch": -1,
+                    },
+                )
             self._train_final_model(
                 hps={
                     "lr": self.conf.getfloat("lr"),
@@ -559,17 +664,10 @@ class Aes2Task(mylib.Task):
                         model=best.model,
                         dst_path=Path(self.conf["job_dir"]),
                     )
-                    device: Optional[torch.device] = None
-                    if self.accelerator == "gpu":
-                        device = torch.device(
-                            f"cuda:{self.devices[0]}"  # type: ignore[index]
-                        )
-                    elif self.accelerator == "mps":
-                        device = torch.device("mps")
                     self._evaluation(
                         model=best.model,
                         epochs=self.trainer.current_epoch,
-                        device=device,
+                        device=self._device(),
                     )
                     self._save_job_config()
                     self._copy_tokenizer_files(src=Path(self.mc["directory"]))
