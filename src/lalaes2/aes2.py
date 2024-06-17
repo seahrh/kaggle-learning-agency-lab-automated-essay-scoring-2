@@ -421,7 +421,7 @@ class Aes2Task(mylib.Task):
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.tra_ds = Aes2Dataset(
                 tokenizer=tokenizer,
-                texts=df["clean_text"].tolist(),
+                texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
             )
             filepath = self.conf["validation_data_file"]
@@ -429,7 +429,7 @@ class Aes2Task(mylib.Task):
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.val_ds = Aes2Dataset(
                 tokenizer=tokenizer,
-                texts=df["clean_text"].tolist(),
+                texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
             )
             del df
