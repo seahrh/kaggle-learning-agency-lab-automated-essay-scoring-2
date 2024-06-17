@@ -15,7 +15,7 @@ from pytorch_lightning.loggers import CSVLogger
 from scml import pandasx as pdx
 from scml import torchx
 from sklearn.metrics import cohen_kappa_score, root_mean_squared_error
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedGroupKFold
 
 # from torch import nn
 # from torch.nn import functional as F
@@ -53,16 +53,21 @@ class Aes2Dataset(Dataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
+        prompts: List[str],
         texts: List[str],
         labels: Optional[List[int]] = None,
+        groups: Optional[List[str]] = None,
     ):
         self.tokenizer = tokenizer
+        self.prompts = prompts
         self.texts = texts
         self.labels = [] if labels is None else labels
+        self.groups = [] if groups is None else groups
 
     def __getitem__(self, idx):
         res = {}
         enc = self.tokenizer(
+            self.prompts[idx],
             self.texts[idx],
             truncation=True,
             padding="max_length",
@@ -421,16 +426,20 @@ class Aes2Task(mylib.Task):
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.tra_ds = Aes2Dataset(
                 tokenizer=tokenizer,
+                prompts=df["prompt"].tolist(),
                 texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
+                groups=df["prompt_title"].tolist(),
             )
             filepath = self.conf["validation_data_file"]
             df = pd.read_parquet(filepath)
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.val_ds = Aes2Dataset(
                 tokenizer=tokenizer,
+                prompts=df["prompt"].tolist(),
                 texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
+                groups=df["prompt_title"].tolist(),
             )
             del df
             gc.collect()
@@ -463,9 +472,11 @@ class Aes2Task(mylib.Task):
         log.info(f"hps={hps}")
         oof_logits = np.full((len(self.tra_ds),), 0, dtype=np.float32)
         with scml.Timer() as tim:
-            splitter = StratifiedKFold(n_splits=self.oof_n_splits, shuffle=True)
+            splitter = StratifiedGroupKFold(n_splits=self.oof_n_splits, shuffle=True)
             for fold, (ti, vi) in enumerate(
-                splitter.split(oof_logits, y=self.tra_ds.labels)
+                splitter.split(
+                    oof_logits, y=self.tra_ds.labels, groups=self.tra_ds.groups
+                )
             ):
                 gc.collect()
                 torch.cuda.empty_cache()
