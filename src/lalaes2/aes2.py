@@ -53,13 +53,13 @@ class Aes2Dataset(Dataset):
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        prompts: List[str],
+        critiques: List[str],
         texts: List[str],
         labels: Optional[List[int]] = None,
         groups: Optional[List[str]] = None,
     ):
         self.tokenizer = tokenizer
-        self.prompts = prompts
+        self.critiques = critiques
         self.texts = texts
         self.labels = [] if labels is None else labels
         self.groups = [] if groups is None else groups
@@ -67,7 +67,7 @@ class Aes2Dataset(Dataset):
     def __getitem__(self, idx):
         res = {}
         enc = self.tokenizer(
-            self.prompts[idx],
+            self.critiques[idx],
             self.texts[idx],
             truncation=True,
             padding="max_length",
@@ -420,26 +420,27 @@ class Aes2Task(mylib.Task):
             )
             train_data_first_n: int = self.conf.getint("train_data_first_n")
             filepath = self.conf["train_data_file"]
+            critique_column = self.conf["critique_column"]
             df = pd.read_parquet(filepath)
             if 0 < train_data_first_n < len(df):
                 df = df.iloc[:train_data_first_n]
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.tra_ds = Aes2Dataset(
                 tokenizer=tokenizer,
-                prompts=df["prompt"].tolist(),
+                critiques=df[critique_column].tolist(),
                 texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
-                groups=df["prompt_title"].tolist(),
+                groups=df["topic"].tolist(),
             )
             filepath = self.conf["validation_data_file"]
             df = pd.read_parquet(filepath)
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
             self.val_ds = Aes2Dataset(
                 tokenizer=tokenizer,
-                prompts=df["prompt"].tolist(),
+                critiques=df[critique_column].tolist(),
                 texts=df["full_text"].tolist(),
                 labels=df["score"].tolist(),
-                groups=df["prompt_title"].tolist(),
+                groups=df["topic"].tolist(),
             )
             del df
             gc.collect()

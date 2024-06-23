@@ -1,11 +1,11 @@
 exclude *.ipynb
 include *.ini
 
-# v2 sequence pair
+# sequence pair
 #include models/lgb/20240617_121519/lgb.txt
-include models/aes2/deberta_v3_base/20240617_164622/*.json
-include models/aes2/deberta_v3_base/20240617_164622/*.safetensors
-include models/aes2/deberta_v3_base/20240617_164622/*.model
+include models/aes2/deberta_v3_base/20240623_143628/*.json
+include models/aes2/deberta_v3_base/20240623_143628/*.safetensors
+include models/aes2/deberta_v3_base/20240623_143628/*.model
 
 # v1 comp data
 #include models/lgb/20240617_121519/lgb.txt
