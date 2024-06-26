@@ -3,9 +3,9 @@ include *.ini
 
 # sequence pair
 #include models/lgb/20240617_121519/lgb.txt
-include models/aes2/deberta_v3_base/20240623_143628/*.json
-include models/aes2/deberta_v3_base/20240623_143628/*.safetensors
-include models/aes2/deberta_v3_base/20240623_143628/*.model
+include models/aes2/deberta_v3_base/20240626_093900/*.json
+include models/aes2/deberta_v3_base/20240626_093900/*.safetensors
+include models/aes2/deberta_v3_base/20240626_093900/*.model
 
 # v1 comp data
 #include models/lgb/20240617_121519/lgb.txt

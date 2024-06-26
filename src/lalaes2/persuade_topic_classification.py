@@ -1,4 +1,3 @@
-import functools
 import gc
 import json
 from configparser import ConfigParser, SectionProxy
@@ -8,17 +7,15 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
-import scipy
 import scml
 import torch
 from pytorch_lightning.loggers import CSVLogger
 from scml import pandasx as pdx
 from scml import torchx
-from sklearn.metrics import cohen_kappa_score, root_mean_squared_error
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 # from torch import nn
-# from torch.nn import functional as F
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import (  # DebertaV2Model,; DebertaV2PreTrainedModel,
@@ -34,40 +31,52 @@ import lalaes2 as mylib
 # from transformers.modeling_outputs import TokenClassifierOutput
 
 __all__ = [
-    "Aes2Dataset",
-    "Aes2Model",
-    "Aes2Task",
-    "predict_holistic_score",
-    "evaluation_aes2",
-    "optimize_thresholds",
-    "qwk_metric",
+    "PersuadeDataset",
+    "PersuadeModel",
+    "PersuadeTask",
+    "classify_persuade_topic_logits",
+    "classify_persuade_topic",
+    "evaluation_persuade",
 ]
 
 log = scml.get_logger(__name__)
 
 
-class Aes2Dataset(Dataset):
+class PersuadeDataset(Dataset):
 
-    HOLISTIC_SCORE_LABELS: List[int] = [1, 2, 3, 4, 5, 6]
+    ID_TO_LABEL: Dict[int, str] = {
+        0: "facial action coding system",
+        1: "distance learning",
+        2: "electoral college work",
+        3: "car free cities",
+        4: "driverless cars",
+        5: "exploring venus",
+        6: "summer projects",
+        7: "mandatory extracurricular activities",
+        8: "cell phones school",
+        9: "grades extracurricular activities",
+        10: "face mars",
+        11: "seeking multiple opinions",
+        12: "community service",
+        13: "cowboy rode waves",
+        14: "phones driving",
+    }
+    LABEL_TO_ID: Dict[str, int] = {v: k for k, v in ID_TO_LABEL.items()}
+    EVALUATION_CLASSES = sorted(list(ID_TO_LABEL.keys()))
 
     def __init__(
         self,
         tokenizer: PreTrainedTokenizer,
-        critiques: List[str],
         texts: List[str],
         labels: Optional[List[int]] = None,
-        groups: Optional[List[str]] = None,
     ):
         self.tokenizer = tokenizer
-        self.critiques = critiques
         self.texts = texts
         self.labels = [] if labels is None else labels
-        self.groups = [] if groups is None else groups
 
     def __getitem__(self, idx):
         res = {}
         enc = self.tokenizer(
-            self.critiques[idx],
             self.texts[idx],
             truncation=True,
             padding="max_length",
@@ -86,7 +95,7 @@ class Aes2Dataset(Dataset):
                 self.labels[idx],
                 # use int64 instead of int32 to prevent error on nvidia gpu
                 # https://stackoverflow.com/questions/69742930/runtimeerror-nll-loss-forward-reduce-cuda-kernel-2d-index-not-implemented-for
-                dtype=torch.float32,
+                dtype=torch.int64,
             )
         return res
 
@@ -94,8 +103,8 @@ class Aes2Dataset(Dataset):
         return len(self.texts)
 
 
-def predict_holistic_score(
-    ds: Aes2Dataset,
+def classify_persuade_topic_logits(
+    ds: PersuadeDataset,
     model: PreTrainedModel,
     batch_size: int,
     device: Optional[torch.device] = None,
@@ -111,92 +120,84 @@ def predict_holistic_score(
     model.to(device)  # type: ignore
     with torch.no_grad():
         for batch in tqdm(
-            batches, desc="predict hms score", disable=not progress_bar, mininterval=10
+            batches,
+            desc="persuade topic classification",
+            disable=not progress_bar,
+            mininterval=10,
         ):
             for k, v in batch.items():
                 batch[k] = v.to(device)
             outputs = model(**batch)  # type: ignore
             # (batch_size, sequence_length, config.num_labels)
             logits = outputs.logits.detach().cpu()
-            logits = logits.squeeze(-1)
-            log.debug(f"{logits.size()}\n{logits}")
+            log.debug(f"logits.size={logits.size()}\n{logits}")
             res += logits.tolist()
     return np.array(res, dtype=dtype)
 
 
-def optimize_thresholds(
-    y_true: List[int], logits: List[float], method: str = "nelder-mead"
-) -> List[float]:
-    def _qwk_negated(thresholds: np.ndarray):
-        y_pred: List[int] = []
-        for score in logits:
-            cls = 1
-            if score >= thresholds[4]:
-                cls = 6
-            elif score >= thresholds[3]:
-                cls = 5
-            elif score >= thresholds[2]:
-                cls = 4
-            elif score >= thresholds[1]:
-                cls = 3
-            elif score >= thresholds[0]:
-                cls = 2
-            y_pred.append(cls)
-        return -cohen_kappa_score(
-            y_true,
-            y_pred,
-            labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
-            weights="quadratic",
-        )
-
-    loss = functools.partial(_qwk_negated)
-    initial_coef = np.array([1.5, 2.5, 3.5, 4.5, 5.5])
-    res = scipy.optimize.minimize(loss, initial_coef, method=method)
-    return res.x.tolist()  # type: ignore[no-any-return]
-
-
-def qwk_metric(
-    y_true: List[int], logits: List[float], thresholds: List[float]
-) -> float:
-    y_pred = pd.cut(
-        x=logits,
-        bins=[-np.inf] + thresholds + [np.inf],
-        labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
+def classify_persuade_topic(
+    ds: PersuadeDataset,
+    model: PreTrainedModel,
+    batch_size: int,
+    device: Optional[torch.device] = None,
+    progress_bar: bool = False,
+    dtype=np.float32,
+) -> np.ndarray:
+    logits = classify_persuade_topic_logits(
+        ds=ds,
+        model=model,
+        batch_size=batch_size,
+        device=device,
+        progress_bar=progress_bar,
+        dtype=dtype,
     )
-    return cohen_kappa_score(  # type: ignore[no-any-return]
-        y_true,
-        y_pred,
-        labels=mylib.Aes2Dataset.HOLISTIC_SCORE_LABELS,
-        weights="quadratic",
-    )
+    y_proba = F.softmax(torch.tensor(logits, dtype=torch.float32), dim=-1)
+    return np.array(y_proba, dtype=dtype)
 
 
-def evaluation_aes2(
-    ds: Aes2Dataset,
+def evaluation_persuade(
+    ds: PersuadeDataset,
     model: PreTrainedModel,
     batch_size: int,
     device: Optional[torch.device] = None,
     progress_bar: bool = True,
 ) -> Dict:
     y_true: List[int] = [int(ds[i]["labels"].item()) for i in range(len(ds))]
-    logits = predict_holistic_score(
-        ds=ds,
-        model=model,
-        batch_size=batch_size,
-        device=device,
-        dtype=np.float32,
-        progress_bar=progress_bar,
-    ).tolist()
-    thresholds = optimize_thresholds(y_true=y_true, logits=logits)
+    y_pred = np.argmax(
+        classify_persuade_topic_logits(
+            ds=ds,
+            model=model,
+            batch_size=batch_size,
+            device=device,
+            dtype=np.float32,
+            progress_bar=progress_bar,
+        ),
+        axis=1,
+    ).flatten()
     return {
-        "thresholds": thresholds,
-        "qwk": qwk_metric(y_true=y_true, logits=logits, thresholds=thresholds),
-        "rmse": root_mean_squared_error(y_true, logits),
+        "f1": f1_score(
+            y_true=y_true,
+            y_pred=y_pred,
+            average="micro",
+            labels=PersuadeDataset.EVALUATION_CLASSES,
+        ),
+        "recall": recall_score(
+            y_true=y_true,
+            y_pred=y_pred,
+            average="micro",
+            labels=PersuadeDataset.EVALUATION_CLASSES,
+        ),
+        "precision": precision_score(
+            y_true=y_true,
+            y_pred=y_pred,
+            average="micro",
+            labels=PersuadeDataset.EVALUATION_CLASSES,
+        ),
     }
 
 
 # noinspection PyAbstractClass
-class Aes2Model(pl.LightningModule):
+class PersuadeModel(pl.LightningModule):
     def __init__(
         self,
         pretrained_dir: str,
@@ -228,8 +229,9 @@ class Aes2Model(pl.LightningModule):
 
     def pretrained_model(self) -> PreTrainedModel:
         config = AutoConfig.from_pretrained(self.hparams.pretrained_dir)
-        config.problem_type = "regression"
-        config.num_labels = 1
+        config.problem_type = "single_label_classification"
+        config.id2label = PersuadeDataset.ID_TO_LABEL
+        config.label2id = PersuadeDataset.LABEL_TO_ID
         setattr(config, "gradient_checkpointing", self.hparams.gradient_checkpointing)
         if self.hparams.hidden_dropout_prob is not None:
             setattr(config, "hidden_dropout_prob", self.hparams.hidden_dropout_prob)
@@ -367,19 +369,18 @@ class Aes2Model(pl.LightningModule):
         return optimizers, [s._asdict() for s in schedulers]
 
 
-class Aes2Task(mylib.Task):
-    name: str = "aes2"
+class PersuadeTask(mylib.Task):
+    name: str = "persuade"
 
     def __init__(
         self,
         conf: ConfigParser,
     ):
         super().__init__(conf=conf)
-        self.tra_ds: Optional[Aes2Dataset] = None
-        self.val_ds: Optional[Aes2Dataset] = None
+        self.tra_ds: Optional[PersuadeDataset] = None
+        self.val_ds: Optional[PersuadeDataset] = None
         self.trainer: Optional[pl.Trainer] = None
         self.batch_size: int = self.conf.getint("batch_size")
-        self.oof_n_splits: int = self.conf.getint("oof_n_splits")
         self.eval_every_n_steps: int = self.conf.getint("eval_every_n_steps")
         self.callbacks = mylib.training_callbacks(
             patience=self.conf.getint("patience"),
@@ -388,12 +389,12 @@ class Aes2Task(mylib.Task):
             save_top_k=self.conf.getint("ckpt_save_top_k"),
         )
 
-    def _best_model(self) -> Aes2Model:
+    def _best_model(self) -> PersuadeModel:
         if self.trainer is None:
             raise ValueError("Trainer must not be null")
         ckpt_path: str = self.trainer.checkpoint_callback.best_model_path
         log.info(f"best_model_path={ckpt_path}")
-        return Aes2Model.load_from_checkpoint(ckpt_path)  # type: ignore[no-any-return]
+        return PersuadeModel.load_from_checkpoint(ckpt_path)  # type: ignore[no-any-return]
 
     def _get_datasets(self) -> None:
         log.info("Prepare dataset...")
@@ -404,27 +405,22 @@ class Aes2Task(mylib.Task):
             )
             train_data_first_n: int = self.conf.getint("train_data_first_n")
             filepath = self.conf["train_data_file"]
-            critique_column = self.conf["critique_column"]
             df = pd.read_parquet(filepath)
             if 0 < train_data_first_n < len(df):
                 df = df.iloc[:train_data_first_n]
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
-            self.tra_ds = Aes2Dataset(
+            self.tra_ds = PersuadeDataset(
                 tokenizer=tokenizer,
-                critiques=df[critique_column].tolist(),
                 texts=df["full_text"].tolist(),
-                labels=df["score"].tolist(),
-                groups=df["topic"].tolist(),
+                labels=[PersuadeDataset.LABEL_TO_ID[topic] for topic in df["topic"]],
             )
             filepath = self.conf["validation_data_file"]
             df = pd.read_parquet(filepath)
             log.info(f"filepath={filepath}\n{pdx.info_string(df)}")
-            self.val_ds = Aes2Dataset(
+            self.val_ds = PersuadeDataset(
                 tokenizer=tokenizer,
-                critiques=df[critique_column].tolist(),
                 texts=df["full_text"].tolist(),
-                labels=df["score"].tolist(),
-                groups=df["topic"].tolist(),
+                labels=[PersuadeDataset.LABEL_TO_ID[topic] for topic in df["topic"]],
             )
             del df
             gc.collect()
@@ -441,7 +437,7 @@ class Aes2Task(mylib.Task):
                 "train_epochs": epochs,
             }
             self.validation_result.update(
-                evaluation_aes2(
+                evaluation_persuade(
                     ds=self.val_ds,
                     model=model,
                     batch_size=self.batch_size * 8,
@@ -449,96 +445,6 @@ class Aes2Task(mylib.Task):
                 )
             )
         log.info(f"Evaluation...DONE. Time taken {str(tim.elapsed)}")
-
-    def _oof_predictions(self, hps: Dict[str, mylib.ParamType]) -> None:
-        if self.tra_ds is None:
-            raise ValueError("train dataset must not be None")
-        log.info("Train model to generate out-of-fold predictions...")
-        log.info(f"hps={hps}")
-        oof_logits = np.full((len(self.tra_ds),), 0, dtype=np.float32)
-        with scml.Timer() as tim:
-            splitter = StratifiedGroupKFold(n_splits=self.oof_n_splits, shuffle=True)
-            for fold, (ti, vi) in enumerate(
-                splitter.split(
-                    oof_logits, y=self.tra_ds.labels, groups=self.tra_ds.groups
-                )
-            ):
-                gc.collect()
-                torch.cuda.empty_cache()
-                tra_ds = torch.utils.data.Subset(self.tra_ds, ti)
-                val_ds = torch.utils.data.Subset(self.tra_ds, vi)
-                log.info(
-                    f"fold={fold}, len(tra)={len(tra_ds):,}, len(val)={len(val_ds):,}"
-                )
-                trainer = pl.Trainer(
-                    enable_checkpointing=False,
-                    default_root_dir=self.conf["job_dir"],
-                    strategy=self.conf.get("train_strategy", "auto"),
-                    precision=self.conf.get("train_precision", None),
-                    accelerator=self.accelerator,
-                    devices=self.devices,
-                    max_epochs=self.conf.getint("oof_epochs"),
-                    deterministic=False,
-                    logger=CSVLogger(save_dir=self.conf["job_dir"]),
-                )
-                log.info(f"trainer.precision={trainer.precision}")
-                log.info(f"model_class={self.conf.get('model_class', 'auto')}")
-                num_workers: int = self.conf.getint("dataloader_num_workers")
-                trainer.fit(
-                    model=Aes2Model(
-                        pretrained_dir=self.mc["directory"],
-                        lr=float(hps["lr"]),
-                        swa_start_epoch=int(hps["swa_start_epoch"]),
-                        scheduler_conf=self.scheduler_conf,
-                        model_class=self.conf.get("model_class", "auto"),
-                        max_position_embeddings=(
-                            self.conf.getint("model_max_length")
-                            if "model_max_length" in self.conf
-                            else None
-                        ),
-                        gradient_checkpointing=(
-                            self.conf.getboolean("gradient_checkpointing")
-                            if "gradient_checkpointing" in self.conf
-                            else False
-                        ),
-                        hidden_dropout_prob=(
-                            self.conf.getfloat("hidden_dropout_prob")
-                            if "hidden_dropout_prob" in self.conf
-                            else None
-                        ),
-                        attention_probs_dropout_prob=(
-                            self.conf.getfloat("attention_probs_dropout_prob")
-                            if "attention_probs_dropout_prob" in self.conf
-                            else None
-                        ),
-                    ),
-                    train_dataloaders=DataLoader(
-                        tra_ds,
-                        batch_size=self.batch_size,
-                        shuffle=True,
-                        num_workers=num_workers,
-                        persistent_workers=True if num_workers > 0 else False,
-                    ),
-                    val_dataloaders=DataLoader(
-                        val_ds,
-                        batch_size=self.batch_size,
-                        shuffle=False,
-                        num_workers=num_workers,
-                        persistent_workers=True if num_workers > 0 else False,
-                    ),
-                )
-                oof_logits[vi] = predict_holistic_score(
-                    ds=val_ds,
-                    model=trainer.model.model,
-                    batch_size=self.batch_size,
-                    device=self._device(),
-                )
-                log.info(f"Fold {fold} completed")
-            with open(Path(self.conf["job_dir"]) / "oof.npy", "wb") as f:
-                np.save(f, oof_logits)
-        log.info(
-            f"Train model to generate out-of-fold predictions...DONE. Time taken {str(tim.elapsed)}"
-        )
 
     def _train_final_model(
         self,
@@ -576,7 +482,7 @@ class Aes2Task(mylib.Task):
             if ckpt_path is not None and len(ckpt_path) == 0:
                 ckpt_path = None
             self.trainer.fit(
-                model=Aes2Model(
+                model=PersuadeModel(
                     pretrained_dir=self.mc["directory"],
                     lr=float(hps["lr"]),
                     swa_start_epoch=int(hps["swa_start_epoch"]),
@@ -624,13 +530,6 @@ class Aes2Task(mylib.Task):
     def run(self) -> None:
         with scml.Timer() as tim:
             self._get_datasets()
-            if self.conf.getboolean("oof_enable"):
-                self._oof_predictions(
-                    hps={
-                        "lr": self.conf.getfloat("lr"),
-                        "swa_start_epoch": -1,
-                    },
-                )
             self._train_final_model(
                 hps={
                     "lr": self.conf.getfloat("lr"),
@@ -643,7 +542,7 @@ class Aes2Task(mylib.Task):
                     log.info("Exit now because signal.SIGTERM signal was received.")
                     return
                 if self.trainer.is_global_zero:
-                    best: Aes2Model = self._best_model()
+                    best: PersuadeModel = self._best_model()
                     self.save_hf_model(
                         model=best.model,
                         dst_path=Path(self.conf["job_dir"]),

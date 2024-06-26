@@ -84,6 +84,10 @@ def _main(argv=None):
         task = mylib.Aes2Task(
             conf=conf,
         )
+    elif args.task_name == mylib.PersuadeTask.name:
+        task = mylib.PersuadeTask(
+            conf=conf,
+        )
     if task is None:
         raise NotImplementedError(f"Unsupported task type: {args.task_name}")
     s: str = conf[args.task_name].get("job_dir", "")
