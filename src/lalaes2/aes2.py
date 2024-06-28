@@ -444,7 +444,7 @@ class Aes2Task(mylib.Task):
                 evaluation_aes2(
                     ds=self.val_ds,
                     model=model,
-                    batch_size=self.batch_size * 8,
+                    batch_size=self.batch_size * 4,
                     device=device,
                 )
             )
